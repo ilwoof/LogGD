@@ -47,8 +47,8 @@ if __name__ == '__main__':
         os.makedirs(args.output_dir, exist_ok=True)
 
     for dataset in args.datasets:
-        # data_dir = os.path.expanduser(f'{args.data_dir}/{dataset}/')
-        data_dir = os.path.expanduser(f'{args.data_dir}')
+        data_dir = os.path.expanduser(f'{args.data_dir}/{dataset}/')
+        # data_dir = os.path.expanduser(f'{args.data_dir}')
         if dataset == 'hdfs':
             window_type = 'session'
             windows = ['session']

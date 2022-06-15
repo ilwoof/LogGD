@@ -86,8 +86,8 @@ def construct_graph_level_data(d_name, d_list, w_size, f_type, d_type=None, keep
         if (idx + 1) % 10000 == 0:
             print(f"processing session {idx + 1}", end='\r')
 
-    print(f"Valid graph in {d_type}={valid_graph}, {anomalous_graphs} graphs are anomalies"
-          f"invalid graph in {d_type}={invalid_graph}, {removed_anomalous_graphs} graphs are anomalies")
+    print(f"Valid graph in {d_type}={valid_graph}, {anomalous_graphs} graphs are anomalies")
+    print(f"invalid graph in {d_type}={invalid_graph}, {removed_anomalous_graphs} graphs are anomalies")
     generate_edge_info(d_name, d_type, w_size, f_type, edges_info_list)
     generate_labels(d_name, d_type, w_size, f_type, labels_list)
     return

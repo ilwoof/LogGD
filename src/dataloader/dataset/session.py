@@ -157,9 +157,9 @@ def fixed_window(raw_data, para):
     n_sess = 0
     for (start_index, end_index) in start_end_index_pair:
         new_data[n_sess] = {
-            "label": label_data[start_index:end_index].to_list(),
             "eventids": logkey_data[start_index: end_index].to_list(),
             "templates": log_template_data[start_index: end_index].to_list(),
+            "label": label_data[start_index:end_index].to_list(),
         }
         # new_data.append({
         #     "label": label_data[start_index:end_index].values,

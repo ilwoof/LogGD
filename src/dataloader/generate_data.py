@@ -20,7 +20,7 @@ def arg_parser():
     :return:
     """
     parser = ArgumentParser()
-    parser.add_argument("--datasets", nargs="+", default=['bgl', 'spirit', 'tbd', 'hdfs'], help="dataset to use")
+    parser.add_argument("--datasets", nargs="+", default=['hdfs', 'bgl', 'spirit', 'tbd'], help="dataset to use")
     parser.add_argument("--data_dir", default="../../dataset/raw/", metavar="DIR", help=" input data directory")
     parser.add_argument("--output_dir", default="../../dataset/processed/", metavar="DIR", help="output directory")
 

@@ -8,6 +8,7 @@ import shutil
 import pickle
 from sklearn.utils import shuffle
 
+
 # In the first column of the log, "-" indicates non-alert messages while others are alert messages.
 def _count_anomaly(log_path):
     total_size = 0
@@ -99,21 +100,19 @@ def process_dataset(data_dir, output_dir, log_file, dataset_name, window_type, w
             step_size = float(step_size) * 60
         if random_sample:
             window_df = sliding(df[["timestamp", "Label", "EventId", "deltaT", "EventTemplate"]],
-                                       para={"window_size": window_size,
-                                             "step_size": step_size})
+                                para={"window_size": window_size, "step_size": step_size}).transpose()
             window_df = shuffle(window_df).reset_index(drop=True)
             n_train = int(len(window_df) * train_size)
-            train_window = window_df.iloc[:n_train, :].to_dict("records")
-            test_window = window_df.iloc[n_train:, :].to_dict("records")
+            train_window = window_df.iloc[:n_train, :].transpose().to_dict()       # .to_dict("records")
+            test_window = window_df.iloc[n_train:, :].transpose().to_dict()        # .to_dict("records")
         else:
             train_window = sliding(
                 df[["timestamp", "Label", "EventId", "deltaT", "EventTemplate"]].iloc[:n_train, :],
-                para={"window_size": window_size,
-                      "step_size": step_size}).to_dict("records")
+                para={"window_size": window_size, "step_size": step_size}).to_dict()        # to_dict("records")
             test_window = sliding(
                 df[["timestamp", "Label", "EventId", "deltaT", "EventTemplate"]].iloc[n_train:, :].reset_index(
                     drop=True),
-                para={"window_size": window_size, "step_size": step_size}).to_dict("records")
+                para={"window_size": window_size, "step_size": step_size}).to_dict()        # to_dict("records")
 
     elif window_type == "session":
         # only for hdfs

@@ -6,52 +6,36 @@ Created on 5/05/2022 1:04 pm
 @author : Yongzheng Xie
 @email : ilwoof@gmail.com
 """
+
 import numpy as np
 
+def log_info(f_result, str_content, sep_flag=None):
+    assert sep_flag in ['-', '*'] or (sep_flag is None)
+    if sep_flag is not None:
+        print(sep_flag * 100)
+    print(str_content)
 
-def record_result(model_name, data_set, window_size, result_auc_list, result_precision_list, result_recall_list, result_f1_list):
+    with open(f_result, 'a+') as f:
+        if sep_flag is not None:
+            print(sep_flag * 100, file=f)
+        print(str_content, file=f)
 
-    result_auc = np.array(result_auc_list)
-    auc_avg = np.mean(result_auc_list)
-    auc_std = np.std(result_auc_list)
 
-    result_precision = np.array(result_precision_list)
-    precision_avg = np.mean(result_precision_list)
-    precision_std = np.std(result_precision_list)
+def record_result(result_file, data_set, window_size, result_dict):
 
-    result_recall = np.array(result_recall_list)
-    recall_avg = np.mean(result_recall_list)
-    recall_std = np.std(result_recall_list)
+    log_content = f"{'-' * 100}\n" \
+                  f"The detection result on dataset {data_set} at window_size={window_size}:\n" \
+                  f"{'-' * 100}\n" \
+                  f"precision average: {np.array(result_dict['precision']).mean():.5f}, std: {np.array(result_dict['precision']).std():.5f}\n" \
+                  f"precision: {np.array(result_dict['precision']).round(5)}\n" \
+                  f"{'-' * 100}\n" \
+                  f"recall average: {np.array(result_dict['recall']).mean():.5f}, std: {np.array(result_dict['recall']).std():.5f}\n" \
+                  f"recall: {np.array(result_dict['recall']).round(5)}\n" \
+                  f"{'-' * 100}\n" \
+                  f"f1 average: {np.array(result_dict['f1']).mean():.5f}, std: {np.array(result_dict['f1']).std():.5f}\n" \
+                  f"f1: {np.array(result_dict['f1']).round(5)}\n" \
+                  f"{'-' * 100}\n" \
+                  f"aucroc average: {np.array(result_dict['auc']).mean():.5f}, std: {np.array(result_dict['auc']).std():.5f}\n" \
+                  f"aucroc: {np.array(result_dict['auc']).round(5)}\n" \
 
-    result_f1 = np.array(result_f1_list)
-    f1_avg = np.mean(result_f1_list)
-    f1_std = np.std(result_f1_list)
-    with open(f'{model_name}_Experiment_results.txt', 'a+') as f:
-        print(f"The detection result for {data_set} at window_size={window_size}:\n"
-              f'{"-" * 100}\n'
-              f'auroc average: {auc_avg}, std: {auc_std}\n'
-              f'auroc: {result_auc}\n'
-              f'{"-" * 100}\n'
-              f'precision average: {precision_avg}, std: {precision_std}\n'
-              f'precision: {result_precision}\n'
-              f'{"-"*100}\n'
-              f'recall average: {recall_avg}, std: {recall_std}\n'
-              f'recall: {result_recall}\n'
-              f'{"-"*100}\n'
-              f'f1 average: {f1_avg}, std: {f1_std}\n'
-              f'f1: {result_f1}\n'
-              , file=f)
-    print(f"The detection result for {model_name} on dataset {data_set} at window_size={window_size}:\n"
-          f'{"-" * 100}\n'
-          f'auroc average: {auc_avg}, std: {auc_std}\n'
-          f'auroc: {result_auc}\n'
-          f'{"-" * 100}\n'
-          f'precision average: {precision_avg}, std: {precision_std}\n'
-          f'precision: {result_precision}\n'
-          f'{"-" * 100}\n'
-          f'recall average: {recall_avg}, std: {recall_std}\n'
-          f'recall: {result_recall}\n'
-          f'{"-" * 100}\n'
-          f'f1 average: {f1_avg}, std: {f1_std}\n'
-          f'f1: {result_f1}\n'
-          )
+    log_info(result_file, log_content)

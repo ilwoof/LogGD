@@ -77,7 +77,7 @@ def process_dataset(data_dir, output_dir, log_file, dataset_name, window_type, w
     # Transformation #
     ##################
     print("Loading", f'{data_dir}{log_file}_structured.csv')
-    df = pd.read_csv(f'{data_dir}{log_file}_structured.csv')
+    df = pd.read_csv(f'{data_dir}{log_file}_structured.csv', low_memory=False)
 
     # build log sequences
     if window_type == "sliding":

@@ -40,12 +40,12 @@ def set_param_configuration(data_name, data_path, w_size='session', s_size=None,
 if __name__ == "__main__":
 
     root_path = f"../../dataset/processed/"
-    for dataset in ['hdfs', 'bgl', 'spirit']:
+    for dataset in ['bgl', 'tbd', 'hdfs']: # 'spirit'
         for test_ratio in [0.2]:
             if dataset == 'hdfs':
                 windows = ['session']
             else:
-                windows = [100, 20]
+                windows = [100, 80, 60, 40, 20]
             for window_size in windows:
                 data_dir = get_data_directory(dataset, root_path, test_ratio)
                 output_path = data_dir
@@ -55,27 +55,35 @@ if __name__ == "__main__":
                 print(f"Starting to process dataset={params['dataset']} test_ratio={test_ratio} window_size={params['window_size']} feature={params['feature_type']}")
                 print("*" * 90)
 
-                session_train, session_test = load_sessions(data_dir=data_dir)
+                # session_train, session_test = load_sessions(data_dir=data_dir)
+
+                with open(f'{root_path}/{dataset}/{dataset}_{window_size}_train.pkl', mode='rb') as f:
+                    session_tr = pickle.load(f)
+
+                with open(f'{root_path}/{dataset}/{dataset}_{window_size}_test.pkl', mode='rb') as f:
+                    session_te = pickle.load(f)
 
                 print(f"Completed {dataset} session data loading")
                 ext = FeatureExtractor(**params)
-                session_train = ext.fit_transform(session_train)
-                session_test = ext.transform(session_test, datatype="test")
+                session_train = ext.fit_transform(session_tr)
+                session_test = ext.transform(session_te, datatype="test")
 
-                data_list = []
-                label_list = []
+                train_data_list = []
+                train_label_list = []
+                test_data_list = []
+                test_label_list = []
 
                 for session_idx, data_dict in enumerate(session_train.values()):
-                    data_list.append(data_dict["eventids"])
-                    label_list.append(data_dict["window_anomalies"][0])
+                    train_data_list.append(data_dict["eventids"])
+                    train_label_list.append(data_dict["window_anomalies"][0])
 
                 with open(f"{data_dir}/{dataset}-{params['window_size']}logs-train.pkl", 'wb') as f:
-                    pickle.dump((data_list, label_list), f)
+                    pickle.dump((train_data_list, train_label_list), f)
 
                 for session_idx, data_dict in enumerate(session_test.values()):
-                    data_list.append(data_dict["eventids"])
-                    label_list.append(data_dict["window_anomalies"][0])
+                    test_data_list.append(data_dict["eventids"])
+                    test_label_list.append(data_dict["window_anomalies"][0])
 
                 with open(f"{data_dir}/{dataset}-{params['window_size']}logs-test.pkl", 'wb') as f:
-                    pickle.dump((data_list, label_list), f)
+                    pickle.dump((test_data_list, test_label_list), f)
                 print(f"Completed {dataset} ecm data generation")

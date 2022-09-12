@@ -15,6 +15,8 @@ import re
 import pickle
 import json
 from collections import OrderedDict, defaultdict
+
+import torch
 from torch.utils.data import Dataset
 
 from src.deeploglizer.common.utils import decision
@@ -56,12 +58,14 @@ class log_dataset(Dataset):
         # flatten all sessions
         for session_idx, data_dict in enumerate(session_dict.values()):
             features = data_dict["features"][feature_type]
+            features_sequential = data_dict["features"]["sequentials"]
             window_labels = data_dict["window_labels"]
             window_anomalies = data_dict["window_anomalies"]
             for window_idx in range(len(window_labels)):
                 sample = {
                     "session_idx": session_idx,  # not session id
                     "features": features[window_idx],
+                    "features_sequential": features_sequential[window_idx],
                     "window_labels": window_labels[window_idx],
                     "window_anomalies": window_anomalies[window_idx],
                 }

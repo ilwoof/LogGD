@@ -22,6 +22,8 @@ from src.deeploglizer.common.utils import (
     load_pickle,
 )
 
+logging.basicConfig(filename='preprocess.log', level=logging.INFO)
+
 from transformers import BertTokenizer, BertModel
 
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -32,7 +34,7 @@ def bert_encoder(s, no_wordpiece=0):
         words = s.split(" ")
         words = [word for word in words if word in bert_tokenizer.vocab.keys()]
         s = " ".join(words)
-    inputs = bert_tokenizer(s, return_tensors='pt', truncation=True, max_length=50)
+    inputs = bert_tokenizer(s, return_tensors='pt', truncation=True, max_length=512)
     outputs = bert_model(**inputs)
     v = torch.mean(outputs.last_hidden_state, 1)
     return v[0].detach().numpy()
@@ -156,12 +158,13 @@ class FeatureExtractor(BaseEstimator):
         max_token_len=50,
         min_token_count=1,
         pretrain_path=None,
-        use_tfidf=False,
+        embedding_type='bert',
         cache=False,
         dataset=None,
         data_dir=None,
         **kwargs,
     ):
+        assert embedding_type in ['bert', 'tfidf', 'w2v']
         self.label_type = label_type
         self.feature_type = feature_type
         self.eval_type = eval_type
@@ -169,7 +172,7 @@ class FeatureExtractor(BaseEstimator):
         self.window_size = window_size
         self.stride = stride
         self.pretrain_path = pretrain_path
-        self.use_tfidf = use_tfidf
+        self.embedding_type = embedding_type
         self.max_token_len = max_token_len
         self.min_token_count = min_token_count
         self.cache = cache
@@ -177,7 +180,9 @@ class FeatureExtractor(BaseEstimator):
         self.meta_data = {}
         self.dataset_name = dataset
         self.data_dir = data_dir
-        self.use_bert = not use_tfidf
+        self.ulog_train = {}
+        self.id2log_train = {}
+        self.log2id_train = {}
 
         if cache:
             param_json = self.get_params()
@@ -188,7 +193,7 @@ class FeatureExtractor(BaseEstimator):
                 param_json, os.path.join(self.cache_dir, "feature_extractor.json")
             )
 
-    def __generate_windows(self, session_dict, stride):
+    def __generate_windows(self, session_dict, stride, label_type='next_log'):
         window_count = 0
         for session_id, data_dict in session_dict.items():
             if self.window_type == "sliding":
@@ -214,7 +219,10 @@ class FeatureExtractor(BaseEstimator):
                     window_anomalies.append(window_anomaly)
                     i += stride
                 else:
-                    window = templates[i:-1]
+                    if label_type == 'next_log':
+                        window = templates[i:-1]
+                    else:
+                        window = templates[i:]
                     window.extend(["PADDING"] * (self.window_size - len(window)))
                     next_log = self.log2id_train.get(templates[-1], 1)
 
@@ -259,10 +267,11 @@ class FeatureExtractor(BaseEstimator):
             total_features.append(feature[1:])  # discard the position of padding
         return np.array(total_features)
 
-    def __windows2sequential(self, windows):
+    def __windows2sequential(self, windows, log2id):
         total_features = []
         for window in windows:
-            ids = [self.log2id_train.get(x, 1) for x in window]
+            # ids = [self.log2id_train.get(x, 1) for x in window]
+            ids = [log2id.get(x, 1) for x in window]
             total_features.append(ids)
         return np.array(total_features)
 
@@ -306,7 +315,7 @@ class FeatureExtractor(BaseEstimator):
         )
         self.log2id_train = {v: k for k, v in self.id2log_train.items()}
 
-        logging.info("{} tempaltes are found.".format(len(self.log2id_train)))
+        logging.info("{} templates are found.".format(len(self.log2id_train)))
 
         if self.label_type == "next_log":
             self.meta_data["num_labels"] = len(self.log2id_train)
@@ -330,7 +339,7 @@ class FeatureExtractor(BaseEstimator):
                 self.meta_data["pretrain_matrix"] = self.vocab.gen_pretrain_matrix(
                     self.pretrain_path
                 )
-            if self.use_tfidf:
+            if self.embedding_type == 'tfidf':
                 self.vocab.fit_tfidf(total_logs)
 
         elif self.feature_type == "sequentials":
@@ -352,7 +361,13 @@ class FeatureExtractor(BaseEstimator):
         if datatype == "test":
             # handle new logs
             ulog_new = ulog - self.ulog_train
+            ulog_union = ulog.copy()
+            ulog_union.update(self.ulog_train)
             logging.info(f"{len(ulog_new)} new templates show while testing.")
+            print(f"Total_nodes={len(ulog_union)}"
+                  f" Train_nodes={len(self.ulog_train)}"
+                  f" Test_nodes={len(ulog)}"
+                  f" Unseen_nodes={len(ulog_new)}\n")
 
         if self.cache:
             cached_file = os.path.join(self.cache_dir, datatype + ".pkl")
@@ -360,37 +375,46 @@ class FeatureExtractor(BaseEstimator):
                 return load_pickle(cached_file)
 
         # generate windows, each window contains logid only
-        if datatype == "train":
-            self.__generate_windows(session_dict, self.stride)
-        else:
-            self.__generate_windows(session_dict, self.stride)
+        self.__generate_windows(session_dict, self.stride, self.label_type)
 
         if self.feature_type == "semantics":
-            if self.use_bert:
+            if self.embedding_type == 'bert':
                 log2idx = {log: bert_encoder(log) for _, log in enumerate(ulog)}
-                log2idx["PADDING"] = np.zeros(len(list(log2idx.values())[0])).reshape(-1)
             else:
-                if self.use_tfidf:
+                if self.embedding_type == 'tfidf':
                     indice = self.vocab.transform_tfidf(ulog).toarray()
                 else:
                     indice = np.array(self.vocab.logs2idx(ulog))
                 log2idx = {log: indice[idx] for idx, log in enumerate(ulog)}
-                log2idx["PADDING"] = np.zeros(indice.shape[1]).reshape(-1)
+
             if datatype == 'train':
-                self.output_semantic_file(log2idx)
+                log2id = self.log2id_train
+            else:
+                id2log_test = {0: '<pad>', 1: '<oov>'}
+                id2log_test.update({idx: log for idx, log in enumerate(log2idx.keys(), 2)})
+                log2id = {v: k for k, v in id2log_test.items()}
+
+            log2idx["PADDING"] = np.zeros(len(list(log2idx.values())[0])).reshape(-1)
+
+            self.output_semantic_file(log2idx, datatype)
+
             logging.info("Extracting semantic features.")
+        else:
+            log2id = self.log2id_train
 
         for session_id, data_dict in session_dict.items():
             feature_dict = defaultdict(list)
             windows = data_dict["windows"]
 
             # generate sequential features # sliding windows on logid list
+            # use the eventids generated by training set when dealing with test set
             if self.feature_type == "sequentials":
-                feature_dict["sequentials"] = self.__windows2sequential(windows)
+                feature_dict["sequentials"] = self.__windows2sequential(windows, log2id)
 
             # generate semantics features # use logid -> token id list
+            # use the eventids generated by testing set rather than training set when dealing with test set
             elif self.feature_type == "semantics":
-                feature_dict["sequentials"] = self.__windows2sequential(windows)
+                feature_dict["sequentials"] = self.__windows2sequential(windows, log2id)
                 feature_dict["semantics"] = self.__window2semantics(windows, log2idx)
 
             # generate quantitative feautres # count logid in each window
@@ -408,15 +432,11 @@ class FeatureExtractor(BaseEstimator):
         self.fit(session_dict)
         return self.transform(session_dict, datatype="train")
 
-    def output_semantic_file(self, log2idx):
-        embedding = '' if self.use_tfidf else '_bert'
-        with open(f"{self.data_dir}/{self.dataset_name}_node_attributes{embedding}.csv", 'w') as f:
-            for template in self.log2id_train.keys():
-                if template == '<pad>':
-                    key = 'PADDING'
-                elif template == '<oov>':
+    def output_semantic_file(self, log2idx, datatype):
+        with open(f"{self.data_dir}/{self.dataset_name}_node_attributes_{self.embedding_type}_{datatype}_{self.window_size}.csv", 'w') as f:
+            f.write(f"{','.join(map(str, log2idx['PADDING']))}\n")
+            for k, v in log2idx.items():
+                if k == 'PADDING':
                     continue
-                else:
-                    key = template
-                f.write(f"{','.join(map(str, log2idx[key]))}\n")
-        print(f"num_nodes={len(self.log2id_train) - 1}")
+                f.write(f"{','.join(map(str, v))}\n")
+        # print(f"{datatype} num_nodes={len(log2idx) - 1}")

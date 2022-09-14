@@ -4,7 +4,6 @@ Created on Tue April 07 17:16:36 2022
 
 @author: Yongzheng Xie
 """
-
 import os
 import time
 import argparse
@@ -25,17 +24,9 @@ from tqdm import tqdm
 
 from feature_extraction import GraphFeatureExtractor
 from configuration import device
-
-from tansform_new import ShortestPathGenerator, LogCollator
-
+from tansform import ShortestPathGenerator, LogCollator
 from evaluate import record_result, log_info
-
-from model.gcn_model import GCNNetwork
-from model.gin_model import GINNetwork
-from model.gat_model import GATNetwork
-from model.gtc_model import GTCNetwork
-
-
+from model.rpgt_model_v9_baseline_modified import GRPENetwork
 from model.lr import PolynomialDecayLR
 from early_stopping import EarlyStopping
 
@@ -49,16 +40,14 @@ model_file_name = f"_checkpoint.pt"
 def arg_parse():
     parser = argparse.ArgumentParser(description='LogGT Arguments')
     parser.add_argument('--data_dir', dest='data_dir', default='../dataset/processed/',
-                        help='Directory where data is located')
-    parser.add_argument('--model', default="gat",
-                        choices=['gin', 'gine', 'gcn2', 'dgcn', 'gat', 'gtc'],
-                        help='The model to be used')
-    parser.add_argument('--datasets', nargs="+", default=['bgl', 'hdfs', 'spirit', 'tbd'], help='The dataset to be processed')
+                        help='Directory where benchmark is located')
+    parser.add_argument('--model', default="LogGT", help='The model to be used')
+    parser.add_argument('--datasets', nargs="+", default=['bgl', 'hdfs', 'tbd', 'spirit'], help='The dataset to be processed')
     parser.add_argument("--sampling_training", nargs="+", default=[1.0], type=float, help='Train data sampling')
     parser.add_argument('--feature_type', dest='feature_type', default='semantics', help='use what node feature')
     parser.add_argument('--embedding_type', dest='embedding_type', choices=['tfidf', 'bert'], default='bert', type=str, help='tfidf or bert is used')
     parser.add_argument("--window_size", nargs="+", default=[100, 80, 60, 40, 20], type=int, help='window size')
-    parser.add_argument("--anomaly_ratio", nargs="+", default=[1.0], type=float)
+    parser.add_argument("--anomaly_ratio", nargs="+", default=[1.0], type=float)  
     parser.add_argument('--clip', dest='clip', default=5.0, type=float, help='Gradient clipping')
     parser.add_argument('--num_epochs', dest='num_epochs', default=100, type=int, help='total epoch number')
     parser.add_argument('--batch_size', dest='batch_size', default=64, type=int, help='Batch size')
@@ -67,7 +56,7 @@ def arg_parse():
     parser.add_argument('--output_dim', dest='output_dim', default=2, type=int, help='Output dimension')
     parser.add_argument("--edge_weight", type=int, default=1, help='The max number of edge weight')
     parser.add_argument("--max_hop", type=int, default=80)
-    parser.add_argument('--num_layer', dest='num_layer', default=4, type=int, help='Encoder layer number')
+    parser.add_argument('--num_layer', dest='num_layer', default=1, type=int, help='Encoder layer number')
     parser.add_argument("--nhead", type=int, default=8)
     parser.add_argument("--perturb_noise", default=0.00, type=float)
     parser.add_argument("--weight_decay", default=0.001, type=float)
@@ -79,7 +68,6 @@ def arg_parse():
     parser.add_argument('--seed', dest='seed', type=int, default=42, help='seed')
     parser.add_argument('--debug_mode', action="store_true", help='The flag is used to indicate one round test')
     return parser.parse_args()
-
 
 def train(train_loader, valid_loader, test_loader, model, args):
     # optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.0001)
@@ -110,13 +98,12 @@ def train(train_loader, valid_loader, test_loader, model, args):
         data_loader = iter(train_loader)
         for batch_idx, batch_data in enumerate(data_loader):
             train_begin_time = time.time()
+            batch_data = batch_data.to(device)
+            batch_data.requires_grad_(False)
 
             optimizer.zero_grad()
-            batch_data.requires_grad_(False)
-            output = model(batch_data.to(device))
-            labels = batch_data.y.to(device)
-
-            loss = criterion(output, labels)
+            output = model(batch_data)
+            loss = criterion(output, batch_data.y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.clip)
             optimizer.step()
@@ -125,7 +112,7 @@ def train(train_loader, valid_loader, test_loader, model, args):
             elapsed = time.time() - train_begin_time
             train_time_list.append(elapsed)
 
-        train_loss = np.array(train_pred_loss)
+        train_loss = np.array(train_pred_loss).mean()
 
         ######################
         # validate the model #
@@ -135,19 +122,17 @@ def train(train_loader, valid_loader, test_loader, model, args):
             valid_pred = []
             data_loader = iter(valid_loader)
             for batch_idx, batch_data in enumerate(data_loader):
-                output = model(batch_data.to(device))
-                labels = batch_data.y.to(device)
-
-                loss = criterion(output, labels)
+                batch_data = batch_data.to(device)
+                output = model(batch_data)
+                loss = criterion(output, batch_data.y)
                 valid_pred.append(loss.cpu().detach().numpy().flatten())
 
-            valid_loss = np.array(valid_pred)
+        valid_loss = np.array(valid_pred).mean()
+        elapsed_time = time.time() - begin_time
+        print(f'[{epoch+1}/{args.num_epochs}] train_loss: {train_loss:.7f} valid_loss: {valid_loss:.7f} elapsed time:{elapsed_time:.5f}')
 
-            elapsed_time = time.time() - begin_time
-            print(f'[{epoch + 1}/{args.num_epochs}] train_loss: {train_loss.mean():.7f} valid_loss: {valid_loss.mean():.7f} elapsed time:{elapsed_time:.5f}')
-
-            if early_stopping(valid_loss.mean(), model, monitor_metric='loss'):
-                break
+        if early_stopping(valid_loss, model, monitor_metric='loss'):
+            break
 
     ######################
     # test the model #
@@ -163,12 +148,12 @@ def train(train_loader, valid_loader, test_loader, model, args):
         data_loader = iter(test_loader)
         for batch_idx, batch_data in enumerate(tqdm(data_loader, desc="testing")):
             test_begin_time = time.time()
-
-            output = model(batch_data.to(device))
-            y.extend(batch_data.y.cpu().detach().numpy().flatten())
-
+            batch_data = batch_data.to(device)
+            output = model(batch_data)
             output = output.softmax(dim=-1)
             test_pred.extend(output.cpu().detach().numpy())
+            y.extend(batch_data.y.cpu().detach().numpy().flatten())
+
             elapsed = time.time() - test_begin_time
             test_time_list.append(elapsed)
 
@@ -189,8 +174,8 @@ def train(train_loader, valid_loader, test_loader, model, args):
         return test_roc_ab, precision, recall, F1_score
 
 
-def get_data_directory(data_name, data_dir, ratio_set):
-    return f"{data_dir}/{data_name}/{data_name.lower()}_{ratio_set}_tar/"
+def get_data_directory(data_name, data_path, ratio_set):
+    return f"{data_path}/{data_name}/{data_name.lower()}_{ratio_set}_tar/"
 
 
 def set_param_configuration(data_name, data_directory, feature_type='semantics', w_size='session', s_size=None,
@@ -206,7 +191,6 @@ def set_param_configuration(data_name, data_directory, feature_type='semantics',
         "stride": w_size if s_size is None else s_size,
     }
     return para_config
-
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -261,13 +245,17 @@ if __name__ == '__main__':
 
                 node_feat_dim = tr_graphs.feat_dim
                 graphs_test = ts_graphs
+                # graphs_test, labels_test = ts_graphs.get_samples(sample_size=1.0, anomaly_ratio=1.0, graph_augment=True)
+                # te_anomaly_num = sum(labels_test)
 
                 # use generator to save memories
                 te_anomaly_num = sum(graphs_test.get_labels().numpy())
 
                 for sample_num in args.sampling_training:
+
                     for anomaly_ratio in args.anomaly_ratio:
-                        training_data, training_labels = tr_graphs.get_samples(sample_size=sample_num, anomaly_ratio=anomaly_ratio)
+
+                        training_data, training_labels = tr_graphs.get_samples(sample_size=sample_num, anomaly_ratio=anomaly_ratio)  # , graph_augment=True)
 
                         log_content = f"Model={args.model}, Dataset={params['dataset']}, Window_size={params['window_size']}, Embedding_type={args.embedding_type}, " \
                                       f"Epochs={args.num_epochs}, Patience={args.patience}, Max_hops={args.max_hop}\n" \
@@ -278,7 +266,7 @@ if __name__ == '__main__':
 
                         result_dict = {'auc': [], 'precision': [], 'recall': [], 'f1': []}
 
-                        kfd = StratifiedShuffleSplit(n_splits=3, train_size=int(len(training_labels) * 0.9), random_state=args.seed)
+                        kfd = StratifiedShuffleSplit(n_splits=3, train_size=int(len(training_labels)*0.9), random_state=args.seed)
 
                         for tr_index, va_index in kfd.split(training_data, training_labels):
 
@@ -295,85 +283,28 @@ if __name__ == '__main__':
 
                             log_info(result_file, log_content, sep_flag=None)
 
-                            if args.model == 'gcn2':
-                                model = GCNNetwork(out_dim=args.output_dim,
-                                                   d_model=args.embedding_dim,
-                                                   num_layer=args.num_layer,
-                                                   dropout=args.dropout,
-                                                   num_node_type=-node_feat_dim,
-                                                   perturb_noise=args.perturb_noise,
-                                                   gnn_type='gcn2',
-                                                   ).to(device)
-
-                            elif args.model == 'dgcn':
-                                model = GCNNetwork(out_dim=args.output_dim,
-                                                   d_model=args.embedding_dim,
-                                                   num_layer=args.num_layer,
-                                                   dropout=args.dropout,
-                                                   num_node_type=-node_feat_dim,
-                                                   perturb_noise=args.perturb_noise,
-                                                   gnn_type='dgcn',
-                                                   ).to(device)
-
-                            elif args.model == 'gin':
-                                model = GINNetwork(out_dim=args.output_dim,
-                                                   d_model=args.embedding_dim,
-                                                   num_layer=args.num_layer,
-                                                   num_node_type=-node_feat_dim,
-                                                   perturb_noise=args.perturb_noise,
-                                                   dropout=args.dropout,
-                                                   gnn_type='gin'
-                                                   ).to(device)
-
-                            elif args.model == 'gine':
-                                model = GINNetwork(out_dim=args.output_dim,
-                                                   d_model=args.embedding_dim,
-                                                   num_layer=args.num_layer,
-                                                   num_node_type=-node_feat_dim,
-                                                   perturb_noise=args.perturb_noise, dropout=args.dropout,
-                                                   gnn_type='gine'
-                                                   ).to(device)
-
-                            elif args.model == 'gat':
-                                model = GATNetwork(out_dim=args.output_dim,
-                                                   d_model=args.embedding_dim,
-                                                   num_layer=2,
-                                                   nhead=args.nhead,
-                                                   dropout=args.dropout,
-                                                   attention_dropout=args.dropout,
-                                                   num_node_type=-node_feat_dim,
-                                                   perturb_noise=args.perturb_noise,
-                                                   ).to(device)
-
-                            elif args.model == 'gtc':
-                                model = GTCNetwork(out_dim=args.output_dim,
-                                                   d_model=args.embedding_dim,
-                                                   num_layer=2,
-                                                   nhead=args.nhead,
-                                                   dropout=args.dropout,
-                                                   num_node_type=-node_feat_dim,
-                                                   perturb_noise=args.perturb_noise,
-                                                   ).to(device)
-                            else:
-                                raise ValueError(f"The specified model {args.model} is not supported")
+                            model = GRPENetwork(out_dim=args.output_dim, d_model=args.embedding_dim,
+                                                dim_feedforward=args.ffn_dim,
+                                                num_layer=args.num_layer, nhead=args.nhead, max_hop=args.max_hop,
+                                                num_node_type=-node_feat_dim,
+                                                num_edge_type=args.edge_weight,  # use edge weight to denote different edge type
+                                                perturb_noise=args.perturb_noise, dropout=args.dropout,
+                                                ).to(device)
 
                             data_train_loader = DataLoader(graphs_train,
                                                            shuffle=True,
                                                            batch_size=args.batch_size,
-                                                           collate_fn=Compose([LogCollator()]),
-                                                           )
+                                                           collate_fn=Compose([LogCollator()]))
 
                             data_valid_loader = DataLoader(graphs_valid,
                                                            shuffle=True,
                                                            batch_size=args.batch_size,
-                                                           collate_fn=Compose([LogCollator()]),
-                                                           )
+                                                           collate_fn=Compose([LogCollator()]))
 
                             data_test_loader = DataLoader(graphs_test,
                                                           shuffle=False,
                                                           batch_size=args.batch_size,
-                                                          collate_fn=Compose([LogCollator()]),
-                                                          )
+                                                          collate_fn=Compose([LogCollator()]))
 
                             result = train(data_train_loader, data_valid_loader, data_test_loader, model, args)
 
@@ -386,7 +317,7 @@ if __name__ == '__main__':
                             del graphs_train, graphs_valid
 
                             if args.debug_mode:
-                                print(f"********* To save time, only one round test is conducted in debug mode *********\n")
+                                print(f"****** To save time, only one round test is conducted in debug mode ******\n")
                                 break
 
                         del training_data, training_labels

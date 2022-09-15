@@ -170,7 +170,7 @@ if __name__ == "__main__":
     parser.add_argument('--datasets', nargs="+", default=['hdfs', 'bgl', 'spirit', 'tbd'], help='The dataset to be processed')
     parser.add_argument('--keep_selfloop', default=True, help='Whether consecutively repetitive events are kept in graphs')
     parser.add_argument('--embedding_type', default='bert', choices=['bert', 'tfidf', 'w2v'], help='The method to generate embedding')
-    parser.add_argument('--window_size', nargs="+", default=[100, 80, 60, 40, 20], type=int, help='window size')
+    parser.add_argument('--window_size', nargs="+", default=[100, 60, 20], type=int, help='window size')
     parser.add_argument('--use_statistics', action="store_true", help='Whether to output the statistics for duplicate events')
     args = parser.parse_args()
 

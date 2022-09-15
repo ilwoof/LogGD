@@ -9,7 +9,9 @@ import time
 import argparse
 import numpy as np
 import random
+import logging
 from numpy.random import seed
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -25,22 +27,22 @@ from tqdm import tqdm
 from feature_extraction import GraphFeatureExtractor
 from configuration import device
 from tansform import ShortestPathGenerator, LogCollator
-from evaluate import record_result, log_info
+from evaluate import record_result, format_output, gather_results
 from model.rpgt_model_v9_baseline_modified import GRPENetwork
 from model.lr import PolynomialDecayLR
 from early_stopping import EarlyStopping
 
-
 np.set_printoptions(threshold=np.inf)
 model_path = f"../result/model/"
 result_path = f"../result/log/"
-result_file_name = f"_experiment_results.txt"
+result_file_name = f"_experiment_results.csv"
 model_file_name = f"_checkpoint.pt"
+
+logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.INFO)
 
 def arg_parse():
     parser = argparse.ArgumentParser(description='LogGT Arguments')
-    parser.add_argument('--data_dir', dest='data_dir', default='../dataset/processed/',
-                        help='Directory where benchmark is located')
+    parser.add_argument('--data_dir', dest='data_dir', default='../dataset/processed/', help='Directory where benchmark is located')
     parser.add_argument('--model', default="LogGT", help='The model to be used')
     parser.add_argument('--datasets', nargs="+", default=['bgl', 'hdfs', 'tbd', 'spirit'], help='The dataset to be processed')
     parser.add_argument("--sampling_training", nargs="+", default=[1.0], type=float, help='Train data sampling')
@@ -54,7 +56,6 @@ def arg_parse():
     parser.add_argument("--embedding_dim", type=int, default=1024)
     parser.add_argument('--ffn_dim', dest='ffn_dim', default=2048, type=int, help='Feed forward network dimension')
     parser.add_argument('--output_dim', dest='output_dim', default=2, type=int, help='Output dimension')
-    parser.add_argument("--edge_weight", type=int, default=1, help='The max number of edge weight')
     parser.add_argument("--max_hop", type=int, default=80)
     parser.add_argument('--num_layer', dest='num_layer', default=1, type=int, help='Encoder layer number')
     parser.add_argument("--nhead", type=int, default=8)
@@ -64,9 +65,10 @@ def arg_parse():
     parser.add_argument("--end_lr", default=1e-9, type=float)
     parser.add_argument("--warmup_epoch", default=3, type=int)
     parser.add_argument('--dropout', dest='dropout', default=0.3, type=float, help='Dropout rate')
-    parser.add_argument('--patience', dest='patience', default=20, type=int, help='Early stopping after patience')
+    parser.add_argument('--patience', dest='patience', default=10, type=int, help='Early stopping after patience')
     parser.add_argument('--seed', dest='seed', type=int, default=42, help='seed')
     parser.add_argument('--debug_mode', action="store_true", help='The flag is used to indicate one round test')
+    parser.add_argument('--no_validation', action="store_true", help='Whether to use validation set for the results')
     return parser.parse_args()
 
 def train(train_loader, valid_loader, test_loader, model, args):
@@ -117,61 +119,87 @@ def train(train_loader, valid_loader, test_loader, model, args):
         ######################
         # validate the model #
         ######################
+        if valid_loader is not None:
+            model.eval()
+            with torch.no_grad():
+                valid_pred = []
+                data_loader = iter(valid_loader)
+                for batch_idx, batch_data in enumerate(data_loader):
+                    batch_data = batch_data.to(device)
+                    output = model(batch_data)
+                    loss = criterion(output, batch_data.y)
+                    valid_pred.append(loss.cpu().detach().numpy().flatten())
+
+            valid_loss = np.array(valid_pred).mean()
+            elapsed_time = time.time() - begin_time
+            print(f'[{epoch + 1}/{args.num_epochs}] '
+                  f'train_loss: {train_loss:.7f} valid_loss: {valid_loss:.7f} elapsed time:{elapsed_time:.5f}')
+
+            if not early_stopping(valid_loss, model, monitor_metric='loss'):
+                continue
+            else:
+                # load the last checkpoint with the best model
+                model.load_state_dict(torch.load(model_file))
+
+        ######################
+        # test the model #
+        ######################
         model.eval()
         with torch.no_grad():
-            valid_pred = []
-            data_loader = iter(valid_loader)
-            for batch_idx, batch_data in enumerate(data_loader):
+            batch_loss = []
+            test_pred = []
+            y = []
+            data_loader = iter(test_loader)
+            for batch_idx, batch_data in enumerate(tqdm(data_loader, desc="testing")):
+                test_begin_time = time.time()
                 batch_data = batch_data.to(device)
                 output = model(batch_data)
                 loss = criterion(output, batch_data.y)
-                valid_pred.append(loss.cpu().detach().numpy().flatten())
+                batch_loss.append(loss.cpu().detach().numpy().flatten())
 
-        valid_loss = np.array(valid_pred).mean()
-        elapsed_time = time.time() - begin_time
-        print(f'[{epoch+1}/{args.num_epochs}] train_loss: {train_loss:.7f} valid_loss: {valid_loss:.7f} elapsed time:{elapsed_time:.5f}')
+                output = output.softmax(dim=-1)
+                test_pred.extend(output.cpu().detach().numpy())
+                y.extend(batch_data.y.cpu().detach().numpy().flatten())
 
-        if early_stopping(valid_loss, model, monitor_metric='loss'):
+                elapsed = time.time() - test_begin_time
+                test_time_list.append(elapsed)
+
+            ground_truth = np.array(y)
+            pred_label = np.array(test_pred)
+
+            fpr_ab, tpr_ab, _ = roc_curve(ground_truth, np.max(pred_label, axis=1))
+            test_roc_ab = auc(fpr_ab, tpr_ab)
+
+            precision, recall, f1_score, _ = precision_recall_fscore_support(ground_truth, np.argmax(pred_label, axis=1), average='binary')
+
+            results = {'loss': np.array(batch_loss).mean(), 'precision': precision, 'recall': recall, 'f1_score': f1_score, 'roc': test_roc_ab}
+
+        # if validation set is used, directly report the results for test set
+        if valid_loader is not None:
+            best_metric = results
             break
+        else:
+            print(f"[{epoch + 1}/{args.num_epochs}] precision={precision:.5f}, recall={recall:.5f}, f1-score={f1_score:.5f}, auc-roc={test_roc_ab:.5f}\n")
+            # if validation set is None, use the best f1_score results for test set
+            if early_stopping(results, model, monitor_metric='f1_score') or (epoch + 1) == args.num_epochs:
+                best_metric = early_stopping.get_best_result()
+                break
+            else:
+                continue
 
-    ######################
-    # test the model #
-    ######################
+    result_details = OrderedDict([
+            ('precision', f"{best_metric['precision']:.5f}"),
+            ('recall', f"{best_metric['recall']:.5f}"),
+            ('f1-score', f"{best_metric['f1_score']:.5f}"),
+            ('auc-roc', f"{best_metric['roc']:.5f}"),
+            (f'training time({epoch + 1} epochs)', f"{np.array(train_time_list).sum():.5f}s"),
+            ('testing time(per batch)', f"{np.array(test_time_list).mean() * 1000:.5f}(ms)"),
 
-    # load the last checkpoint with the best model
-    model.load_state_dict(torch.load(model_file))
+        ])
 
-    model.eval()
-    with torch.no_grad():
-        test_pred = []
-        y = []
-        data_loader = iter(test_loader)
-        for batch_idx, batch_data in enumerate(tqdm(data_loader, desc="testing")):
-            test_begin_time = time.time()
-            batch_data = batch_data.to(device)
-            output = model(batch_data)
-            output = output.softmax(dim=-1)
-            test_pred.extend(output.cpu().detach().numpy())
-            y.extend(batch_data.y.cpu().detach().numpy().flatten())
+    logging.info(format_output(result_details))
 
-            elapsed = time.time() - test_begin_time
-            test_time_list.append(elapsed)
-
-        ground_truth = np.array(y)
-        pred_label = np.array(test_pred)
-
-        fpr_ab, tpr_ab, _ = roc_curve(ground_truth, np.max(pred_label, axis=1))
-        test_roc_ab = auc(fpr_ab, tpr_ab)
-
-        precision, recall, F1_score, _ = precision_recall_fscore_support(ground_truth, np.argmax(pred_label, axis=1), average='binary')
-
-        log_content = f"precision={precision:.5f}, recall={recall:.5f}, f1-score={F1_score:.5f}, auc-roc={test_roc_ab:.5f}\n" \
-                      f"Training time(total {epoch+1} epochs)={np.array(train_time_list).sum():.5f}(s), " \
-                      f"Testing time(per graph)={np.array(test_time_list).mean() * 1000:.5f}(ms)\n"
-
-        log_info(result_file, log_content, sep_flag='-')
-
-        return test_roc_ab, precision, recall, F1_score
+    return best_metric
 
 
 def get_data_directory(data_name, data_path, ratio_set):
@@ -222,7 +250,8 @@ if __name__ == '__main__':
             for window_size in windows:
 
                 data_dir = get_data_directory(data_set, args.data_dir, test_ratio)
-                params = set_param_configuration(data_set, data_dir, args.feature_type, window_size, embedding_type=args.embedding_type)
+                params = set_param_configuration(data_set, data_dir, args.feature_type, window_size,
+                                                 embedding_type=args.embedding_type)
                 print(f"Starting to process dataset={params['dataset']} window_size={params['window_size']}")
 
                 tr_graphs = GraphFeatureExtractor(root=data_dir,
@@ -249,69 +278,101 @@ if __name__ == '__main__':
                 # te_anomaly_num = sum(labels_test)
 
                 # use generator to save memories
+                te_size = len(graphs_test)
                 te_anomaly_num = sum(graphs_test.get_labels().numpy())
+                te_anomaly_ratio = float(te_anomaly_num/te_size)
 
                 for sample_num in args.sampling_training:
-
                     for anomaly_ratio in args.anomaly_ratio:
+                        training_data, training_labels = tr_graphs.get_samples(sample_size=sample_num,
+                                                                               anomaly_ratio=anomaly_ratio)  # , graph_augment=True)
 
-                        training_data, training_labels = tr_graphs.get_samples(sample_size=sample_num, anomaly_ratio=anomaly_ratio)  # , graph_augment=True)
+                        data_setting = OrderedDict([
+                                        ('model_name', args.model),
+                                        ('data_set', data_set),
+                                        ('window_size', window_size),
+                                        ('embedding_type', args.embedding_type),
+                                        ('epochs', args.num_epochs),
+                                        ('patience', args.patience),
+                                        ('no_validation', args.no_validation),
+                                        ('max_hops', args.max_hop),
+                                        ('test_ratio', test_ratio),
+                                        ('sampling_ratio', sample_num),
+                                        ('anomaly_ratio', anomaly_ratio),
+                                        ('dataset_nodes', tr_graphs.dataset_node_size),
+                                        ('max_graph_nodes', tr_graphs.max_graph_node_size),
+                                        ])
 
-                        log_content = f"Model={args.model}, Dataset={params['dataset']}, Window_size={params['window_size']}, Embedding_type={args.embedding_type}, " \
-                                      f"Epochs={args.num_epochs}, Patience={args.patience}, Max_hops={args.max_hop}\n" \
-                                      f"Test_ratio={test_ratio}, Sampling_ratio={sample_num}, Anomaly_ratio={anomaly_ratio}, " \
-                                      f"Dataset_nodes={tr_graphs.dataset_node_size}, Max_graph_nodes={tr_graphs.max_graph_node_size}"
+                        logging.info(format_output(data_setting))
 
-                        log_info(result_file, log_content, sep_flag='*')
+                        kfd = StratifiedShuffleSplit(n_splits=3, train_size=int(len(training_labels) * 0.9),
+                                                     random_state=args.seed)
 
-                        result_dict = {'auc': [], 'precision': [], 'recall': [], 'f1': []}
-
-                        kfd = StratifiedShuffleSplit(n_splits=3, train_size=int(len(training_labels)*0.9), random_state=args.seed)
+                        result_dict = {'roc': [], 'precision': [], 'recall': [], 'f1': []}
 
                         for tr_index, va_index in kfd.split(training_data, training_labels):
 
-                            graphs_train = [training_data[idx] for idx in tr_index]
-                            graphs_valid = [training_data[idx] for idx in va_index]
+                            if args.no_validation:
+                                graphs_train = training_data
+                                graphs_valid = []
+                                tr_size = len(graphs_train)
+                                va_size = len(graphs_valid)
+                                tr_anomaly_num = sum(1 for graph in graphs_train if graph.y == 1)
+                                va_anomaly_num = 0
+                                tr_anomaly_ratio = float(tr_anomaly_num / tr_size)
+                                va_anomaly_ratio = 0.0
 
-                            # use generator to save memories
-                            tr_anomaly_num = sum(1 for graph in graphs_train if graph.y == 1)
-                            va_anomaly_num = sum(1 for graph in graphs_valid if graph.y == 1)
+                            else:
+                                graphs_train = [training_data[idx] for idx in tr_index]
+                                graphs_valid = [training_data[idx] for idx in va_index]
 
-                            log_content = f"Training(size/anomalies/ratio)={len(graphs_train)}/{tr_anomaly_num}/{(tr_anomaly_num/len(graphs_train)):.3f}, " \
-                                          f"Validation={len(graphs_valid)}/{va_anomaly_num}/{(va_anomaly_num/len(graphs_valid)):.3f}, " \
-                                          f"Test={len(graphs_test)}/{te_anomaly_num}/{(te_anomaly_num/len(graphs_test)):.3f}\n"
+                                # use generator to save memories
+                                tr_size = len(graphs_train)
+                                va_size = len(graphs_valid)
+                                tr_anomaly_num = sum(1 for graph in graphs_train if graph.y == 1)
+                                va_anomaly_num = sum(1 for graph in graphs_valid if graph.y == 1)
+                                tr_anomaly_ratio = float(tr_anomaly_num / tr_size)
+                                va_anomaly_ratio = float(va_anomaly_num / va_size)
 
-                            log_info(result_file, log_content, sep_flag=None)
+                            data_split_details = OrderedDict([
+                                ('training(size/anomalies/ratio)', f"{tr_size}/{tr_anomaly_num}/{tr_anomaly_ratio:.3f}"),
+                                ('validation', f"{va_size}/{va_anomaly_num}/{va_anomaly_ratio:.3f}"),
+                                ('test', f"{te_size}/{te_anomaly_num}/{te_anomaly_ratio:.3f}"),
+                                ])
+
+                            logging.info(format_output(data_split_details))
 
                             model = GRPENetwork(out_dim=args.output_dim, d_model=args.embedding_dim,
                                                 dim_feedforward=args.ffn_dim,
                                                 num_layer=args.num_layer, nhead=args.nhead, max_hop=args.max_hop,
                                                 num_node_type=-node_feat_dim,
-                                                num_edge_type=args.edge_weight,  # use edge weight to denote different edge type
                                                 perturb_noise=args.perturb_noise, dropout=args.dropout,
                                                 ).to(device)
 
                             data_train_loader = DataLoader(graphs_train,
                                                            shuffle=True,
                                                            batch_size=args.batch_size,
-                                                           collate_fn=Compose([LogCollator()]))
+                                                           collate_fn=Compose([LogCollator()]),
+                                                           )
 
-                            data_valid_loader = DataLoader(graphs_valid,
-                                                           shuffle=True,
-                                                           batch_size=args.batch_size,
-                                                           collate_fn=Compose([LogCollator()]))
+                            if args.no_validation:
+                                data_valid_loader = None
+                            else:
+                                assert len(graphs_valid) > 0
+                                data_valid_loader = DataLoader(graphs_valid,
+                                                               shuffle=True,
+                                                               batch_size=args.batch_size,
+                                                               collate_fn=Compose([LogCollator()]))
 
                             data_test_loader = DataLoader(graphs_test,
                                                           shuffle=False,
                                                           batch_size=args.batch_size,
-                                                          collate_fn=Compose([LogCollator()]))
+                                                          collate_fn=Compose([LogCollator()]),
+                                                          )
 
-                            result = train(data_train_loader, data_valid_loader, data_test_loader, model, args)
+                            one_round_result = train(data_train_loader, data_valid_loader, data_test_loader, model, args)
 
-                            result_dict['auc'].append(result[0])
-                            result_dict['precision'].append(result[1])
-                            result_dict['recall'].append(result[2])
-                            result_dict['f1'].append(result[3])
+                            result_dict = gather_results(result_dict, one_round_result)
 
                             del data_train_loader, data_valid_loader, data_test_loader
                             del graphs_train, graphs_valid
@@ -322,4 +383,4 @@ if __name__ == '__main__':
 
                         del training_data, training_labels
 
-                        record_result(result_file, data_set, window_size, result_dict)
+                        record_result(result_file, data_setting, result_dict)

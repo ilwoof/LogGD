@@ -26,7 +26,7 @@ def arg_parser():
 
     # parser.add_argument("--window_type", default="session", type=str, choices=["sliding", "session"])
     parser.add_argument("--session_level", default="entry", type=str, choices=["entry", "mins"])
-    parser.add_argument('--window_size', nargs="+", default=[100, 80, 60, 40, 20], type=int, help='window size/mins') # only entry is considered
+    parser.add_argument('--window_size', nargs="+", default=[100, 60, 20], type=int, help='window size/mins') # only entry is considered
     # parser.add_argument('--step_size', default=1, type=float, help='step size/mins')  # for our case, only fixed_window is considered
     parser.add_argument('--train_size', default=0.8, type=float, help="train size", metavar="float or int")
 

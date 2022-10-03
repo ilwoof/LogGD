@@ -7,7 +7,6 @@ import numpy as np
 from collections import Counter, defaultdict
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.base import BaseEstimator
-from sklearn.preprocessing import OneHotEncoder
 import hashlib
 import pickle
 import re
@@ -208,8 +207,9 @@ class FeatureExtractor(BaseEstimator):
                     next_log = self.log2id_train.get(templates[i + self.window_size], 1)
 
                     if isinstance(data_dict["label"], list):
+                        # window_anomaly label should not include the label of the next log
                         window_anomaly = int(
-                            1 in data_dict["label"][i: i + self.window_size + 1]
+                            1 in data_dict["label"][i: i + self.window_size]
                         )
                     else:
                         window_anomaly = data_dict["label"]
@@ -270,7 +270,6 @@ class FeatureExtractor(BaseEstimator):
     def __windows2sequential(self, windows, log2id):
         total_features = []
         for window in windows:
-            # ids = [self.log2id_train.get(x, 1) for x in window]
             ids = [log2id.get(x, 1) for x in window]
             total_features.append(ids)
         return np.array(total_features)
@@ -301,8 +300,8 @@ class FeatureExtractor(BaseEstimator):
     def fit(self, session_dict):
         if self.load():
             return
-        log_padding = "<pad>"
-        log_oov = "<oov>"
+        log_padding = "PADDING"
+        log_oov = "OOV"
 
         # encode
         total_logs = list(
@@ -390,7 +389,7 @@ class FeatureExtractor(BaseEstimator):
             if datatype == 'train':
                 log2id = self.log2id_train
             else:
-                id2log_test = {0: '<pad>', 1: '<oov>'}
+                id2log_test = {0: 'PADDING', 1: 'OOV'}
                 id2log_test.update({idx: log for idx, log in enumerate(log2idx.keys(), 2)})
                 log2id = {v: k for k, v in id2log_test.items()}
 
@@ -434,9 +433,9 @@ class FeatureExtractor(BaseEstimator):
 
     def output_semantic_file(self, log2idx, datatype):
         with open(f"{self.data_dir}/{self.dataset_name}_node_attributes_{self.embedding_type}_{datatype}_{self.window_size}.csv", 'w') as f:
+            # The 'PADDING' node whose vector is all zeros is placed first in the node attribute list
             f.write(f"{','.join(map(str, log2idx['PADDING']))}\n")
             for k, v in log2idx.items():
                 if k == 'PADDING':
                     continue
                 f.write(f"{','.join(map(str, v))}\n")
-        # print(f"{datatype} num_nodes={len(log2idx) - 1}")
